@@ -1,5 +1,9 @@
+import functools
 import hashlib
+import inspect
 import io
+import platform
+import sys
 import re
 import textwrap
 
@@ -11,6 +15,38 @@ import seaborn as sns
 import streamlit as st
 
 import engine  # Motor de backend (usa parsers.py para leer los ficheros)
+import parsers
+
+APP_VERSION = "2026.11.06-b"
+
+
+# ---------------------------------------------------------------------------
+# Compatibilidad entre versiones de Streamlit
+# ---------------------------------------------------------------------------
+# Las versiones recientes de Streamlit sustituyen use_container_width=True por
+# width="stretch" y han retirado el parámetro antiguo. Este envoltorio traduce
+# la llamada según lo que acepte la versión instalada, así la app funciona igual
+# en local y en el servidor aunque tengan versiones distintas.
+def _compat_ancho(fn):
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return fn
+    if "use_container_width" in params:
+        return fn
+
+    @functools.wraps(fn)
+    def envoltorio(*args, use_container_width=None, **kwargs):
+        if use_container_width and "width" in params and "width" not in kwargs:
+            kwargs["width"] = "stretch"
+        return fn(*args, **kwargs)
+
+    return envoltorio
+
+
+for _nombre in ("dataframe", "plotly_chart", "button", "download_button", "pyplot"):
+    if hasattr(st, _nombre):
+        setattr(st, _nombre, _compat_ancho(getattr(st, _nombre)))
 
 st.set_page_config(
     page_title="ATFCM Sector & Configuration Analyzer",
@@ -105,6 +141,9 @@ def render_tab1():
             st.session_state[estado] = list(files or [])
             if files:
                 st.success(f"Cargados: {len(files)} {titulo.split()[-1]}")
+
+    st.markdown("---")
+    panel_diagnostico()
 
 
 # ---------------------------------------------------------------------------
@@ -761,7 +800,8 @@ def render_tab_inspeccion_espacio_aereo(d):
         agg["Porcentaje (%)"] = (agg["Minutos_Totales"] / tot * 100).round(2) if tot else 0.0
         agg = agg.sort_values("Minutos_Totales", ascending=False)
         t1, t2 = st.columns([2, 1])
-        t1.dataframe(agg, use_container_width=True, hide_index=True)
+        with t1:
+            st.dataframe(agg, use_container_width=True, hide_index=True)
         with t2:
             st.plotly_chart(px.pie(agg, names="Configuracion", values="Minutos_Totales", title="Distribución por minutos"), use_container_width=True)
         return
@@ -956,12 +996,44 @@ se usa una heurística por nombre (terminado en dígito → ES).
 
 
 # ---------------------------------------------------------------------------
+# Diagnóstico del despliegue
+# ---------------------------------------------------------------------------
+def _version_de(modulo):
+    try:
+        return __import__(modulo).__version__
+    except Exception:
+        return "no instalado"
+
+
+def panel_diagnostico():
+    """Versiones y rutas reales en ejecución, para comparar el equipo local con el servidor."""
+    with st.expander("🩺 Diagnóstico del despliegue (compara local y servidor)"):
+        filas = [
+            ("app.py", APP_VERSION, __file__),
+            ("engine.py", getattr(engine, "__version__", "sin versión"), getattr(engine, "__file__", "")),
+            ("parsers.py", getattr(parsers, "__version__", "sin versión"), getattr(parsers, "__file__", "")),
+            ("Python", platform.python_version(), sys.executable),
+        ] + [(m, _version_de(m), "") for m in ("streamlit", "pandas", "numpy", "plotly",
+                                                 "matplotlib", "seaborn", "openpyxl")]
+        st.dataframe(pd.DataFrame(filas, columns=["Componente", "Versión", "Ruta"]), hide_index=True)
+        st.caption("Si la app funciona en local y no en el servidor, compara esta tabla en los dos sitios. "
+                   "Las tres versiones de app/engine/parsers deben coincidir, y conviene fijar en "
+                   "`requirements.txt` la versión de Streamlit que usas en local (por ejemplo `streamlit==1.40.2`).")
+
+
+# ---------------------------------------------------------------------------
 def main():
     st.title("✈️ ATFCM Sector & Configuration Analyzer")
     faltan = [f for f in ENGINE_REQUIRED if not hasattr(engine, f)]
-    if faltan:
-        st.error("🚨 El fichero `engine.py` desplegado es anterior a este `app.py` (faltan: "
-                 f"`{', '.join(faltan)}`). Sube juntos `app.py`, `engine.py` y `parsers.py` de la misma versión.")
+    distintas = [f"`{n}` = {getattr(m, '__version__', 'sin versión')}" for n, m in
+                 (("engine.py", engine), ("parsers.py", parsers)) if getattr(m, "__version__", None) != APP_VERSION]
+    if faltan or distintas:
+        st.error("🚨 Los ficheros desplegados no son de la misma versión. "
+                 f"`app.py` = {APP_VERSION}; " + "; ".join(distintas) +
+                 (f". Faltan funciones en engine.py: `{', '.join(faltan)}`" if faltan else "") +
+                 ". Sube juntos `app.py`, `engine.py` y `parsers.py` a la misma carpeta del repositorio "
+                 "y reinicia la app (Manage app → Reboot app).")
+        panel_diagnostico()
         st.stop()
     tabs = st.tabs(["📁 Carga de Archivos", "📊 Análisis Global", "⚙️ Motor de Desdoblamiento",
                     "🔍 Inspección Jerárquica", "💾 Exportación", "📖 Metodología"])

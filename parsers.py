@@ -16,6 +16,8 @@ Formatos esperados (separador ';', codificación latin-1):
         (anidamiento); se expande de forma recursiva.
 """
 
+__version__ = "2026.11.06-b"  # debe coincidir con APP_VERSION de app.py
+
 import re
 
 import pandas as pd

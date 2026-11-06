@@ -9,6 +9,8 @@ Flujo:
      nueva) y generar los ficheros NEST de salida.
 """
 
+__version__ = "2026.11.06-b"  # debe coincidir con APP_VERSION de app.py
+
 import io
 import math
 import re

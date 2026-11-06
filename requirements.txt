@@ -1,3 +1,10 @@
+# Dependencias de ATFCM Sector & Configuration Analyzer.
+# Este fichero debe estar en la raíz del repositorio (o en la misma carpeta que app.py).
+#
+# Recomendado: fija aquí las versiones exactas que usas en local para que el
+# servidor instale lo mismo. Puedes verlas en la pestaña 1 > "Diagnóstico del
+# despliegue" o con:  pip show streamlit pandas plotly
+# y sustituir, por ejemplo, "streamlit>=1.30" por "streamlit==1.40.2".
 streamlit>=1.30
 pandas>=2.0
 numpy
