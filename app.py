@@ -24,6 +24,9 @@ for _k, _v in {"uploaded_cos": [], "uploaded_spc": [], "uploaded_cfg": [],
         st.session_state[_k] = _v
 
 TURNOS = ["Mañana", "Tarde", "Noche"]
+# Funciones del motor que esta versión de la app necesita
+ENGINE_REQUIRED = ["sector_usage_table", "explode_sectors", "usage_table", "sector_config_usage",
+                   "configs_used", "cs_options_for_acc", "minimal_partitions", "rank_partitions"]
 
 
 # ---------------------------------------------------------------------------
@@ -389,17 +392,44 @@ def etiqueta_uso(cs, uso_cs):
     return f"{cs} · {_fmt_min(m)} en {dias} días" if m else f"{cs} · sin uso en el ciclo"
 
 
-# Enlaces entre pestañas: se ejecutan como callback, antes de dibujar los selectores
-def enviar_al_motor(acc, cs):
-    st.session_state["acc_select"] = acc
-    st.session_state[f"cs_select_{acc}"] = cs
-    st.session_state["solo_operativos"] = True
-    st.session_state["motor_enlace"] = (acc, cs)
+# ---------------------------------------------------------------------------
+# Selección compartida entre el Motor y la Inspección Jerárquica
+# ---------------------------------------------------------------------------
+# st.session_state["sel_activa"] = (ACC, CS). Solo cambia cuando el usuario elige
+# algo en uno de los selectores enlazados (los callbacks se ejecutan antes de cada
+# recarga). Cada pestaña la aplica a sus selectores ANTES de dibujarlos, así que
+# las dos muestran siempre el mismo ACC y el mismo CS.
+SEL = "sel_activa"
 
 
-def ver_en_inspeccion(acc, cs):
-    st.session_state.update(hier_acc=acc, hier_fecha=FECHA_TODAS_INSP, hier_nivel=NIVEL_CS, detail_CS=cs,
-                            insp_enlace=(acc, cs))
+def _sel():
+    return st.session_state.get(SEL) or (None, None)
+
+
+def _cb_motor_acc():
+    st.session_state[SEL] = (st.session_state.get("acc_select"), None)
+
+
+def _cb_motor_cs(acc):
+    st.session_state[SEL] = (acc, st.session_state.get(f"cs_select_{acc}"))
+
+
+def _cb_insp_acc():
+    st.session_state[SEL] = (st.session_state.get("hier_acc"), None)
+
+
+def _cb_insp_cs():
+    st.session_state[SEL] = (st.session_state.get("hier_acc"), st.session_state.get("detail_CS"))
+
+
+def _cb_ver_sector_activo():
+    st.session_state["hier_nivel"] = NIVEL_CS
+    st.session_state["hier_fecha"] = FECHA_TODAS_INSP
+
+
+def banner_sector_activo(acc, cs):
+    st.info(f"🔗 **Sector activo** (compartido entre el Motor y la Inspección Jerárquica): `{acc}` · `{cs}`. "
+            "Cámbialo en cualquiera de las dos pestañas y la otra lo sigue.")
 
 
 def panel_uso_cs(df_cos, cfg_map, acc, cs, fila_uso):
@@ -426,11 +456,6 @@ def panel_uso_cs(df_cos, cfg_map, acc, cs, fila_uso):
         with e2:
             st.markdown("**Configuraciones que se reescribirán**")
             st.dataframe(por_cnf, use_container_width=True, hide_index=True)
-        if acc in set(df_cos["ACC"]):
-            st.button(f"🔍 Ver {cs} en la Inspección Jerárquica", key="btn_ir_inspeccion",
-                      on_click=ver_en_inspeccion, args=(acc, cs))
-            if st.session_state.get("insp_enlace") == (acc, cs):
-                st.caption("Seleccionado en la pestaña **Inspección Jerárquica**.")
     return False
 
 
@@ -476,7 +501,12 @@ def render_tab3(d):
     * `AUDITORIA_<ACC>_<CS>.csv`: el detalle tramo a tramo.
     * `LEEME.txt`: un resumen de la ejecución.
 
-    **Enlace con la Inspección Jerárquica.** Las cifras de uso salen del mismo cálculo en las dos pestañas. El botón **🔍 Ver en la Inspección Jerárquica** deja seleccionado el CS allí, y desde la Inspección el botón **⚙️ Analizar el desdoblamiento** lo trae aquí. Después, haz clic en la pestaña de destino.
+    **Enlace con la Inspección Jerárquica.** El ACC y el CS forman un **sector activo compartido** entre las dos pestañas (lo indica el aviso azul 🔗):
+    * Al elegir un ACC o un CS aquí, la Inspección muestra el mismo ACC y, en el nivel *Por Sector Integrado (CS)*, el detalle de ese CS.
+    * Al elegir un ACC o un CS en la Inspección, el Motor lo selecciona automáticamente. Si el CS no tuvo uso en el ciclo, se desmarca la casilla de operativos para poder mostrarlo.
+    * Si el sector elegido en la Inspección no es desdoblable, o su ACC no está en el `.CFG`, el Motor mantiene su selección y lo indica.
+    * Las cifras de uso coinciden en las dos pestañas porque salen del mismo cálculo.
+    * Streamlit no permite cambiar de pestaña desde el código: después de elegir, haz clic en la otra pestaña.
     """)
 
     df_cos, cfg_map, es_map = d["df_cos"], d["cfg_map"], d["es_map"]
@@ -491,10 +521,14 @@ def render_tab3(d):
     accs_cos = set(df_cos["ACC"].unique()) if not df_cos.empty else set()
     accs = sorted(accs_cfg, key=lambda a: (a not in accs_cos, a))  # primero los que tienen COS
 
+    sel_acc0, sel_cs0 = _sel()
     c1, c2 = st.columns(2)
     with c1:
-        _sanear("acc_select", accs)
-        acc_sel = st.selectbox("1. Seleccionar ACC:", options=accs, key="acc_select")
+        if sel_acc0 in accs:
+            st.session_state["acc_select"] = sel_acc0
+        else:
+            _sanear("acc_select", accs)
+        acc_sel = st.selectbox("1. Seleccionar ACC:", options=accs, key="acc_select", on_change=_cb_motor_acc)
     opciones_cs = engine.cs_options_for_acc(acc_sel, cfg_map, es_map)
     uso = (engine.sector_usage_table(df_cos, cfg_map, acc_sel) if not df_cos.empty
            else pd.DataFrame(columns=engine.USO_COLS))
@@ -504,9 +538,13 @@ def render_tab3(d):
         if not opciones_cs:
             st.info("Este ACC no abre ningún sector que el .SPC defina con 2 o más ES.")
             return
+        if "solo_operativos" not in st.session_state:
+            st.session_state["solo_operativos"] = True
+        if sel_acc0 == acc_sel and sel_cs0 in opciones_cs and sel_cs0 not in operativos:
+            st.session_state["solo_operativos"] = False  # el sector activo no tuvo uso: mostrarlo
         solo_op = st.checkbox(
             f"Solo CS operativos en el ciclo cargado ({len(operativos)} de {len(opciones_cs)})",
-            value=True, key="solo_operativos",
+            key="solo_operativos",
             help="Oculta los CS que no se abrieron en ningún tramo del .COS: desdoblarlos no cambiaría nada.")
         lista = operativos if solo_op else opciones_cs
         if not lista:
@@ -515,13 +553,24 @@ def render_tab3(d):
             return
         lista = sorted(lista, key=lambda c: (-int(uso_cs.loc[c, "Minutos"]), c))
         key_cs = f"cs_select_{acc_sel}"
-        _sanear(key_cs, lista)
+        if sel_acc0 == acc_sel and sel_cs0 in lista:
+            st.session_state[key_cs] = sel_cs0
+        else:
+            _sanear(key_cs, lista)
         cs_sel = st.selectbox("2. Sector colapsado (CS) a desdoblar (ordenado por uso):", options=lista,
-                              key=key_cs, format_func=lambda c: etiqueta_uso(c, uso_cs))
+                              key=key_cs, format_func=lambda c: etiqueta_uso(c, uso_cs),
+                              on_change=_cb_motor_cs, args=(acc_sel,))
 
-    enlace = st.session_state.get("motor_enlace")
-    if enlace == (acc_sel, cs_sel):
-        st.info(f"🔗 {cs_sel} seleccionado desde la Inspección Jerárquica.")
+    # Si la selección compartida aún no apunta a un CS de este ACC, la fija el Motor
+    if sel_acc0 is None or (sel_acc0 == acc_sel and sel_cs0 is None):
+        st.session_state[SEL] = (acc_sel, cs_sel)
+    if _sel() == (acc_sel, cs_sel):
+        banner_sector_activo(acc_sel, cs_sel)
+    elif sel_acc0 not in accs:
+        st.info(f"🔗 El ACC activo en la Inspección ({sel_acc0}) no está en el .CFG; el Motor mantiene {acc_sel}.")
+    else:
+        st.info(f"🔗 El sector activo en la Inspección ({sel_cs0}) no se puede desdoblar; "
+                f"el Motor mantiene {cs_sel}.")
 
     universo = sorted(es_map[cs_sel])
     sector_min = {k: int(v) for k, v in uso["Minutos"].items()}
@@ -666,7 +715,12 @@ def render_tab_inspeccion_espacio_aereo(d):
 
     **Detalle de un sector.** El selector está ordenado de más a menos uso. Muestra el reparto por turno y las configuraciones en las que se abrió.
 
-    **Enlace con el Motor de desdoblamiento.** En el nivel CS, si el sector es desdoblable, el botón **⚙️ Analizar el desdoblamiento de X en el Motor** deja seleccionados el ACC y el CS en la pestaña Motor; después, haz clic en esa pestaña. Las cifras de uso coinciden en ambas pestañas porque salen del mismo cálculo.
+    **Enlace con el Motor de desdoblamiento.** El ACC y el CS forman un **sector activo compartido** con el Motor (aviso azul 🔗):
+    * El ACC elegido aquí pasa al Motor, que muestra el último CS elegido para ese ACC o, si no hay ninguno, el más usado.
+    * En el nivel CS, el sector elegido en el selector de detalle pasa al Motor si es desdoblable. Debajo del selector se indica si lo es.
+    * Lo que elijas en el Motor aparece aquí: mismo ACC y, en el nivel CS, el detalle de ese sector. Si estás en otro nivel, el botón **👁️ Ver el detalle** te lleva al nivel CS con el ciclo completo.
+    * Si eliges un día concreto en el que el sector activo no se abrió, se avisa y basta con volver al ciclo completo.
+    * Las cifras coinciden con las del Motor porque salen del mismo cálculo. Para ir al Motor, haz clic en su pestaña.
     """)
 
     df_cos, cfg_map, es_map = d["df_cos"], d["cfg_map"], d["es_map"]
@@ -674,11 +728,15 @@ def render_tab_inspeccion_espacio_aereo(d):
         st.warning("⚠️ Carga al menos ficheros .COS en la Pestaña 1.")
         return
 
+    sel_acc0, sel_cs0 = _sel()
     h1, h2, h3 = st.columns(3)
     accs = sorted(df_cos["ACC"].unique())
     with h1:
-        _sanear("hier_acc", accs)
-        sel_acc = st.selectbox("1. Seleccionar ACC:", options=accs, key="hier_acc")
+        if sel_acc0 in accs:
+            st.session_state["hier_acc"] = sel_acc0
+        else:
+            _sanear("hier_acc", accs)
+        sel_acc = st.selectbox("1. Seleccionar ACC:", options=accs, key="hier_acc", on_change=_cb_insp_acc)
     df_acc = df_cos[df_cos["ACC"] == sel_acc]
     fechas = [FECHA_TODAS_INSP] + sorted(df_acc["Fecha"].unique())
     niveles = ["Por Configuración", NIVEL_CS, "Por Sector Elemental (ES)"]
@@ -689,6 +747,11 @@ def render_tab_inspeccion_espacio_aereo(d):
         nivel = st.selectbox("3. Nivel de Consulta:", options=niveles, key="hier_nivel")
 
     df_scope = df_acc if sel_fecha.startswith("TODOS") else df_acc[df_acc["Fecha"] == sel_fecha]
+    hay_activo = sel_acc0 == sel_acc and sel_cs0 is not None
+    if hay_activo and nivel != NIVEL_CS:
+        banner_sector_activo(sel_acc, sel_cs0)
+        st.button(f"👁️ Ver el detalle de {sel_cs0} (nivel CS, ciclo completo)", key="btn_ver_activo",
+                  on_click=_cb_ver_sector_activo)
     st.markdown("---")
 
     if nivel == "Por Configuración":
@@ -739,17 +802,25 @@ def render_tab_inspeccion_espacio_aereo(d):
 
     st.markdown("---")
     opciones_det = list(uso.index)  # ordenados por minutos, como en el Motor
-    _sanear(f"detail_{tipo}", opciones_det)
+    key_det = f"detail_{tipo}"
+    if tipo == "CS" and hay_activo and sel_cs0 in opciones_det:
+        st.session_state[key_det] = sel_cs0
+    else:
+        _sanear(key_det, opciones_det)
     sector_sel = st.selectbox(f"Selecciona un sector {tipo} para ver sus configuraciones:", options=opciones_det,
-                              key=f"detail_{tipo}", format_func=lambda s: f"{s} · {_fmt_min(uso.loc[s, 'Minutos'])}")
-    if st.session_state.get("insp_enlace") == (sel_acc, sector_sel):
-        st.info(f"🔗 {sector_sel} seleccionado desde el Motor de desdoblamiento.")
+                              key=key_det, format_func=lambda s: f"{s} · {_fmt_min(uso.loc[s, 'Minutos'])}",
+                              on_change=_cb_insp_cs if tipo == "CS" else None)
     if tipo == "CS":
+        if _sel() == (sel_acc, sector_sel):
+            banner_sector_activo(sel_acc, sector_sel)
+        elif hay_activo:
+            st.caption(f"El sector activo {sel_cs0} no se abrió en este ámbito temporal; "
+                       "elige el ciclo completo para verlo.")
         if sector_sel in desdoblables and acc_en_motor:
-            st.button(f"⚙️ Analizar el desdoblamiento de {sector_sel} en el Motor", key="btn_ir_motor",
-                      on_click=enviar_al_motor, args=(sel_acc, sector_sel), type="primary")
-            if st.session_state.get("motor_enlace") == (sel_acc, sector_sel):
-                st.caption("Listo: abre la pestaña **Motor de Desdoblamiento**, ya tiene este ACC y este CS seleccionados.")
+            if _sel() == (sel_acc, sector_sel):
+                st.caption(f"✅ {sector_sel} es desdoblable y la pestaña **Motor de Desdoblamiento** ya lo tiene seleccionado.")
+            else:
+                st.caption(f"✅ {sector_sel} es desdoblable: vuelve a elegirlo en este selector para enviarlo al Motor.")
         else:
             st.caption(f"{sector_sel} no se puede desdoblar en el Motor: el .SPC no lo define con 2 o más ES "
                        "o el ACC no está en el .CFG.")
@@ -887,6 +958,11 @@ se usa una heurística por nombre (terminado en dígito → ES).
 # ---------------------------------------------------------------------------
 def main():
     st.title("✈️ ATFCM Sector & Configuration Analyzer")
+    faltan = [f for f in ENGINE_REQUIRED if not hasattr(engine, f)]
+    if faltan:
+        st.error("🚨 El fichero `engine.py` desplegado es anterior a este `app.py` (faltan: "
+                 f"`{', '.join(faltan)}`). Sube juntos `app.py`, `engine.py` y `parsers.py` de la misma versión.")
+        st.stop()
     tabs = st.tabs(["📁 Carga de Archivos", "📊 Análisis Global", "⚙️ Motor de Desdoblamiento",
                     "🔍 Inspección Jerárquica", "💾 Exportación", "📖 Metodología"])
 
