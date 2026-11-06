@@ -1,6 +1,7 @@
 import hashlib
 import io
 import re
+import textwrap
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -61,7 +62,7 @@ def sectores_de(cnf, cnf_map):
 
 def guia(texto):
     with st.expander("📖 Guía de Uso e Información de la Pestaña", expanded=False):
-        st.markdown(texto)
+        st.markdown(textwrap.dedent(texto))
     st.markdown("---")
 
 
@@ -71,9 +72,21 @@ def guia(texto):
 def render_tab1():
     st.header("1. Carga de Archivos de Entrada (.COS, .SPC, .CFG)")
     guia("""
-    * **Qué representa:** El punto de entrada de datos maestros de la sesión.
-    * **Datos requeridos:** Esquemas de apertura (`.COS`), definición de sectores (`.SPC`) y catálogo de configuraciones (`.CFG`) exportados de NEST.
-    * **Interacción del usuario:** Carga multi-archivo. Quitar un fichero del cargador lo elimina también del análisis.
+    **Qué es.** El punto de entrada de la sesión: aquí se cargan los tres ficheros de NEST que usan todas las demás pestañas.
+
+    **Ficheros esperados** (separador `;`, codificación latin-1):
+
+    | Fichero | Contenido | Ejemplo de línea |
+    |---|---|---|
+    | `.COS` | Esquema de apertura: qué configuración abre cada ACC en cada tramo horario | `11/06/2026;LECMCTAS;04:45;05:05;CNF3C;E` |
+    | `.SPC` | Sectores colapsados (`A`) y sus componentes (`S`); un componente puede ser otro bloque | `A;LECBG12;...` y debajo `S;LECBG1` |
+    | `.CFG` | Sectores que abre cada configuración de cada ACC | `LECBCTAW;CNF4CW;LECBG23` |
+
+    **Cómo se usa.**
+    * Puedes cargar varios ficheros de cada tipo (por ejemplo, varios ciclos de `.COS`); se combinan.
+    * Las líneas vacías o que empiezan por `#` o `;` se ignoran, igual que las cabeceras y las líneas sin horas válidas.
+    * Un tramo con hora de fin menor o igual que la de inicio se interpreta como cruce de medianoche (`23:30–01:15` = 105 min).
+    * Quitar un fichero del cargador lo elimina también del análisis. Si cambias los ficheros después de ejecutar un desdoblamiento, el resultado anterior se descarta para no mezclar datos.
     """)
 
     col_cos, col_spc, col_cfg = st.columns(3)
@@ -97,9 +110,21 @@ def render_tab1():
 def render_tab2(d):
     st.header("2. Dashboard de Exploración y Análisis del ACC")
     guia("""
-    * **Qué representa:** Curvas de apertura, dinámica de desdobles y colapsos, Gantt de sectores y asistente predictivo.
-    * **Datos requeridos:** `.COS` y `.CFG` (el `.SPC` permite distinguir CS de ES).
-    * **Interacción del usuario:** Enfoque de análisis y filtros por ACC, fecha, turno y tipo de sector.
+    **Qué es.** Exploración del comportamiento real de un ACC en el ciclo: cuántos sectores abre, cuándo desdobla o colapsa y qué sectores usa.
+
+    **Datos necesarios.** `.COS` y `.CFG`. Con el `.SPC` se distingue además entre sectores colapsados (CS) y elementales (ES). Sin `.CFG`, el número de sectores se estima a partir del nombre de la configuración (`CNF7…` → 7).
+
+    **Filtros comunes.**
+    * **ACC**: el centro a analizar. Las configuraciones se buscan solo en el catálogo de ese ACC.
+    * **Fecha**: un día concreto o todos los días agregados.
+    * **Turno**: Mañana (07–15 h), Tarde (15–22 h) o Noche (22–07 h), según la hora de inicio del tramo.
+    * **Tipo de sector**: cuenta todos los sectores, solo los CS o solo los ES (solo afecta a 2.1).
+
+    **Enfoques.**
+    * **2.1 Análisis global**: curva de sectores abiertos a lo largo del día (media por hora si eliges todos los días), mínimo, máximo y media en sala **ponderada por duración**, y minutos por configuración y turno.
+    * **2.2 Dinámica de desdobles y colapsos**: cada cambio de configuración, con cuántos sectores se ganan o pierden y cuáles. La secuencia se calcula día a día, así que el primer tramo de un día no se compara con el último del anterior.
+    * **2.3 Gantt**: qué sectores están abiertos en cada momento. El color indica la **carga de la sala** (sectores abiertos en esa configuración), no la carga del propio sector. Para leer horas concretas, filtra un solo día.
+    * **2.4 Asistente predictivo**: a partir del histórico completo del ACC, probabilidad de que a una hora dada (±15 min) haya desdoble, colapso o estabilidad. Si eliges una fecha, solo usa los días de la misma semana (por ejemplo, todos los jueves).
     """)
 
     df_cos, cfg_map, es_map = d["df_cos"], d["cfg_map"], d["es_map"]
@@ -412,9 +437,46 @@ def panel_uso_cs(df_cos, cfg_map, acc, cs, fila_uso):
 def render_tab3(d):
     st.header("3. Motor de Desdoblamiento de Sectores Colapsados (CS)")
     guia("""
-    * **Qué representa:** Desdobla un CS en el **menor número de piezas** (CS intermedios o ES definidos en el `.SPC`) y reescribe los `.COS` y el `.CFG` para NEST.
-    * **Datos requeridos:** `.SPC`, `.CFG` y `.COS`.
-    * **Interacción del usuario:** Elige ACC y CS. La herramienta calcula todas las particiones mínimas y propone la mejor; puedes elegir otra o escribir una a mano. Tras ejecutar, descarga el `.zip` (también disponible en la Pestaña 5).
+    **Qué es.** Desdobla un sector colapsado (CS) en el **menor número de piezas** posible (CS intermedios o ES definidos en el `.SPC`) y genera los `.COS` y `.CFG` para simular en NEST la demora y las regulaciones con ese desdoble.
+
+    **Datos necesarios.** `.SPC`, `.CFG` y `.COS`.
+
+    **Paso a paso.**
+    1. **ACC**: aparecen primero los que tienen tramos en el `.COS`.
+    2. **Sector colapsado (CS)**: solo los que el `.SPC` define con 2 o más ES y el ACC abre en alguna configuración. Por defecto se muestran **solo los CS operativos en el ciclo cargado**, ordenados de más a menos uso, con sus horas y días de apertura. Desmarca la casilla para ver también los que no se usaron.
+    3. **Revisa el uso del CS**: horas abierto, días con apertura, tramos del `.COS` que se modificarán y número de configuraciones distintas. El desplegable de detalle muestra el reparto por turno y las configuraciones que se reescribirán. Si el CS no se abrió en el ciclo, aparece un aviso y el botón Ejecutar queda desactivado.
+    4. **Elige la partición** en la tabla de particiones mínimas (por defecto, la primera) o escribe una a mano en *Piezas*.
+    5. **Ajusta los parámetros** y pulsa **Ejecutar Desdoblamiento**.
+    6. **Descarga el ZIP** (también disponible en la pestaña Exportación).
+
+    **Tabla de particiones mínimas.**
+
+    | Columna | Significado |
+    |---|---|
+    | Nº piezas | Número de piezas; todas las filas tienen el mínimo posible |
+    | Partición | Piezas que la forman |
+    | Configs existentes | Configuraciones del `.COS` que, tras el desdoble, coinciden con una que ya existe en el `.CFG` y se reutilizan |
+    | Configs nuevas | Configuraciones del `.COS` cuyo resultado no existe en el `.CFG` y habrá que crear |
+    | Piezas sin CS propio | Piezas que no tienen bloque `A` propio en el `.SPC` (solo aparecen como `S` de otro bloque) |
+    | Minutos históricos piezas | Suma de los minutos que cada pieza estuvo abierta en el ciclo: cuánto se usa ya esa forma de partir |
+
+    Orden: menos piezas sin CS propio → menos configuraciones nuevas → más minutos históricos. Solo cuentan las configuraciones que **aparecen en el `.COS`**, que son las únicas que se reescriben.
+
+    **Parámetros de ejecución.**
+    * **Piezas**: lo que se aplicará. Se rellena con la partición elegida y se puede editar (separa con `;` o `,`). Al ejecutar se valida que cubra el CS de forma exacta: sin ES que falten o sobren, sin solapes entre piezas, sin nombres inexistentes ni repetidos y con al menos dos piezas.
+    * **Sufijo**: se añade a las configuraciones nuevas, que se renumeran con el total real de sectores (`CNF3C` → `CNF4C_D`). Si el nombre ya existe se añade un número (`_D2`).
+    * **Longitud máxima de nombre**: si NEST limita los caracteres del nombre de configuración, indícalo y se avisará de los que lo superen. Con 0 no se comprueba.
+
+    **Resultado.** Indicadores de tramos modificados y configuraciones nuevas o reutilizadas, la lista de configuraciones nuevas, la matriz PRE ➔ POST y el detalle tramo a tramo. Los tramos con configuraciones que no están en el `.CFG` se dejan sin cambios y se avisa.
+
+    **Contenido del ZIP.**
+    * `AUDIT_<fichero>.cos`: el `.COS` reescrito. Las líneas de otros ACC y el formato original se conservan.
+    * `NUEVAS_CONFIGURACIONES_<ACC>.cfg`: solo las configuraciones creadas.
+    * `CFG_FUSIONADO_<ACC>.cfg`: el `.CFG` original más las nuevas, listo para cargar en NEST.
+    * `AUDITORIA_<ACC>_<CS>.csv`: el detalle tramo a tramo.
+    * `LEEME.txt`: un resumen de la ejecución.
+
+    **Enlace con la Inspección Jerárquica.** Las cifras de uso salen del mismo cálculo en las dos pestañas. El botón **🔍 Ver en la Inspección Jerárquica** deja seleccionado el CS allí, y desde la Inspección el botón **⚙️ Analizar el desdoblamiento** lo trae aquí. Después, haz clic en la pestaña de destino.
     """)
 
     df_cos, cfg_map, es_map = d["df_cos"], d["cfg_map"], d["es_map"]
@@ -587,9 +649,24 @@ def mostrar_resultado(d):
 def render_tab_inspeccion_espacio_aereo(d):
     st.header("4. Inspección Jerárquica: ACC ➔ Configuración ➔ CS ➔ ES")
     guia("""
-    * **Qué representa:** Minutos de uso y distribución por turno de configuraciones y sectores.
-    * **Datos requeridos:** `.COS`, `.CFG` y `.SPC`.
-    * **Interacción del usuario:** ACC, ámbito temporal y nivel de consulta.
+    **Qué es.** Cuánto tiempo y en qué turnos se usó cada configuración y cada sector de un ACC. Sirve para decidir qué CS conviene desdoblar.
+
+    **Datos necesarios.** `.COS`; para los niveles de sector, también `.CFG` y `.SPC`.
+
+    **Selectores.**
+    * **ACC**: centro a consultar.
+    * **Ámbito temporal**: el ciclo completo o un día concreto.
+    * **Nivel de consulta**:
+        * *Por Configuración*: minutos, número de tramos y porcentaje de tiempo de cada configuración.
+        * *Por Sector Integrado (CS)* / *Por Sector Elemental (ES)*: mapa de calor de minutos por sector y turno, tabla resumen y detalle de un sector.
+
+    **Tabla resumen de sectores.** Minutos totales, días con apertura, tramos y minutos por turno. En el nivel CS se añaden:
+    * **Nº ES (SPC)**: cuántos sectores elementales forman el CS.
+    * **Desdoblable en el Motor**: si el Motor puede desdoblarlo (el `.SPC` lo define con 2 o más ES y el ACC está en el `.CFG`).
+
+    **Detalle de un sector.** El selector está ordenado de más a menos uso. Muestra el reparto por turno y las configuraciones en las que se abrió.
+
+    **Enlace con el Motor de desdoblamiento.** En el nivel CS, si el sector es desdoblable, el botón **⚙️ Analizar el desdoblamiento de X en el Motor** deja seleccionados el ACC y el CS en la pestaña Motor; después, haz clic en esa pestaña. Las cifras de uso coinciden en ambas pestañas porque salen del mismo cálculo.
     """)
 
     df_cos, cfg_map, es_map = d["df_cos"], d["cfg_map"], d["es_map"]
@@ -714,8 +791,16 @@ def generar_excel(hojas):
 def render_tab_export(d):
     st.header("5. Exportación de Datasets y Ficheros NEST")
     guia("""
-    * **Qué representa:** Descarga del dataset consolidado en Excel y del paquete `.zip` generado por el motor.
-    * **Datos requeridos:** `.COS` cargados y, para el ZIP, una ejecución previa en la Pestaña 3.
+    **Qué es.** Descarga de los datos de la sesión y de los ficheros NEST generados por el Motor.
+
+    **Dataset consolidado (Excel).** Un `.xlsx` con estas hojas:
+    * **Tramos**: todos los tramos de los `.COS` cargados, con duración y turno.
+    * **Auditoria_desdoble**: el detalle tramo a tramo del último desdoblamiento (si lo hay).
+    * **Configuraciones_nuevas**: las configuraciones que creó ese desdoblamiento (si las hay).
+
+    Cada hoja se puede descargar también por separado en CSV (separador `;`). Si el servidor no tiene instalada una librería de Excel (`openpyxl` o `xlsxwriter`), se avisa y solo quedan disponibles los CSV.
+
+    **Paquete del Motor (ZIP).** Los mismos ficheros que en la pestaña Motor: `.COS` reescritos, `.CFG` con las nuevas configuraciones, `.CFG` fusionado, auditoría en CSV y `LEEME.txt`. Solo aparece si has ejecutado un desdoblamiento con los ficheros cargados ahora mismo.
     """)
 
     df_cos = d["df_cos"]
@@ -780,6 +865,22 @@ su nombre; si no, se crea una configuración nueva renumerada con el recuento re
 
 **Salida (ZIP).** `AUDIT_<fichero>.cos`, `NUEVAS_CONFIGURACIONES_<ACC>.cfg` (solo las nuevas),
 `CFG_FUSIONADO_<ACC>.cfg` (original + nuevas), `AUDITORIA_<ACC>_<CS>.csv` y `LEEME.txt`.
+
+**Uso de los sectores.** Cada tramo del `.COS` se expande en una fila por sector abierto en su configuración
+(según el `.CFG` del ACC). A partir de esa tabla se calculan, para cada sector, los minutos abiertos, los días con
+apertura, el número de tramos y el reparto por turno. El Motor y la Inspección Jerárquica usan exactamente este
+mismo cálculo, por eso sus cifras coinciden. Un CS con 0 minutos no se abrió en el ciclo: desdoblarlo no cambiaría
+el `.COS`, por lo que el Motor lo oculta por defecto y no permite ejecutarlo.
+
+**Configuraciones que cuentan.** En el ranking de particiones solo se consideran las configuraciones que abren el CS
+**y aparecen en el `.COS`**. Una configuración definida en el `.CFG` pero nunca usada no se reescribe y no cuenta como
+existente ni como nueva.
+
+**Turnos y duraciones.** Mañana 07–15 h, Tarde 15–22 h y Noche 22–07 h, según la hora de inicio del tramo. Un
+tramo cuya hora de fin es menor o igual que la de inicio cruza la medianoche.
+
+**Clasificación CS / ES.** Un sector es CS si el `.SPC` lo define con más de un ES y ES en otro caso. Sin `.SPC`
+se usa una heurística por nombre (terminado en dígito → ES).
 """)
 
 
